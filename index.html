@@ -1,0 +1,650 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>KC Business Solutions — ROI Calculator</title>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600;700&display=swap');
+
+  :root {
+    --bg: #0B0F13;
+    --card: #111820;
+    --border: #1E2A36;
+    --text: #E8ECF0;
+    --label: #9AABB8;
+    --muted: #5A7080;
+    --accent: #00D4AA;
+    --accent2: #00A3FF;
+    --green: #00D4AA;
+    --red: #FF5C6A;
+    --amber: #FFB84D;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Space Grotesk', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+  }
+
+  input[type="range"] {
+    -webkit-appearance: none;
+    appearance: none;
+    height: 6px;
+    background: var(--border);
+    border-radius: 3px;
+    outline: none;
+    cursor: pointer;
+  }
+  input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--accent);
+    cursor: pointer;
+    box-shadow: 0 0 10px rgba(0,212,170,0.4);
+  }
+  input[type="range"]::-moz-range-thumb {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--accent);
+    cursor: pointer;
+    border: none;
+    box-shadow: 0 0 10px rgba(0,212,170,0.4);
+  }
+
+  .fade-in { animation: fadeUp 0.4s ease-out both; }
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  @media (max-width: 700px) {
+    .grid-2 { grid-template-columns: 1fr !important; }
+    .grid-3 { grid-template-columns: 1fr !important; }
+    .grid-4 { grid-template-columns: 1fr 1fr !important; }
+    .kpi-row { flex-direction: column !important; }
+  }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useMemo } = React;
+
+const MONTHS = 36;
+
+function calculate(inputs) {
+  const {
+    // Sales costs
+    salesDailyWage,
+    benefitsMultiplier,
+    workDaysPerMonth,
+    rampUpMonths,
+    // Client acquisition
+    clientsPerMonth,
+    avgEmployeesPerClient,
+    // Revenue
+    onboardingFeePerEmployee,
+    pepmFee,
+    monthlyPlatformFee,
+    // Freemium funnel
+    freeUsersPerMonth,
+    freeToPayConversionPct,
+    avgMonthsToConvert,
+    // Costs
+    opCostPerEmployee,
+    monthlyFixedCosts,
+    // Retention
+    monthlyClientRetention,
+  } = inputs;
+
+  const monthlySalesCost = salesDailyWage * workDaysPerMonth * benefitsMultiplier;
+  const retentionDecimal = monthlyClientRetention / 100;
+  const churnRate = 1 - retentionDecimal;
+  const conversionRate = freeToPayConversionPct / 100;
+
+  let cumulativeCost = 0;
+  let cumulativeRevenue = 0;
+  let breakEvenMonth = null;
+  const monthlyData = [];
+
+  // Track paid client cohorts: each entry = { clients, employees }
+  // Each cohort retains independently
+  let paidCohorts = []; // { clients, employees }
+  let freePipeline = []; // { users, monthAge }
+
+  for (let m = 1; m <= MONTHS; m++) {
+    // Ramp: linear ramp from 0 to full over rampUpMonths
+    const rampFactor = rampUpMonths > 0 ? Math.min(m / rampUpMonths, 1) : 1;
+
+    // Direct sales: new paid clients this month
+    const directClients = Math.round(clientsPerMonth * rampFactor);
+    const directEmployees = directClients * avgEmployeesPerClient;
+
+    // Freemium funnel: add free users, age pipeline, convert
+    freePipeline.push({ users: Math.round(freeUsersPerMonth * rampFactor), monthAge: 0 });
+    let convertedClients = 0;
+    let convertedEmployees = 0;
+    freePipeline = freePipeline.map(cohort => {
+      cohort.monthAge++;
+      if (cohort.monthAge >= avgMonthsToConvert && cohort.users > 0) {
+        const converting = Math.round(cohort.users * conversionRate);
+        convertedClients += converting;
+        convertedEmployees += converting * avgEmployeesPerClient;
+        cohort.users -= converting;
+      }
+      return cohort;
+    }).filter(c => c.users > 0);
+
+    // Add new paid cohort (direct + converted)
+    const totalNewClients = directClients + convertedClients;
+    const totalNewEmployees = directEmployees + convertedEmployees;
+    if (totalNewClients > 0) {
+      paidCohorts.push({ clients: totalNewClients, employees: totalNewEmployees });
+    }
+
+    // One-time onboarding revenue from new clients
+    const onboardingRevenue = totalNewEmployees * onboardingFeePerEmployee;
+
+    // Apply retention to existing cohorts (skip the one just added)
+    paidCohorts = paidCohorts.map((cohort, idx) => {
+      if (idx === paidCohorts.length - 1 && totalNewClients > 0) return cohort; // new, no churn
+      return {
+        clients: cohort.clients * retentionDecimal,
+        employees: cohort.employees * retentionDecimal,
+      };
+    });
+
+    // Totals
+    const activeClients = paidCohorts.reduce((s, c) => s + c.clients, 0);
+    const activeEmployees = paidCohorts.reduce((s, c) => s + c.employees, 0);
+    const activeFreeUsers = freePipeline.reduce((s, c) => s + c.users, 0);
+
+    // Monthly recurring revenue
+    const recurringRevenue = (activeEmployees * pepmFee) + (activeClients * monthlyPlatformFee);
+    const monthRevenue = onboardingRevenue + recurringRevenue;
+
+    // Monthly costs
+    const monthCost = monthlySalesCost + monthlyFixedCosts + (activeEmployees * opCostPerEmployee);
+
+    const monthProfit = monthRevenue - monthCost;
+    cumulativeCost += monthCost;
+    cumulativeRevenue += monthRevenue;
+
+    if (breakEvenMonth === null && cumulativeRevenue >= cumulativeCost) {
+      breakEvenMonth = m;
+    }
+
+    monthlyData.push({
+      month: m,
+      activeClients: Math.round(activeClients),
+      activeEmployees: Math.round(activeEmployees),
+      activeFreeUsers: Math.round(activeFreeUsers),
+      newClients: totalNewClients,
+      onboardingRevenue: Math.round(onboardingRevenue),
+      recurringRevenue: Math.round(recurringRevenue),
+      monthRevenue: Math.round(monthRevenue),
+      monthCost: Math.round(monthCost),
+      monthProfit: Math.round(monthProfit),
+      cumulativeRevenue: Math.round(cumulativeRevenue),
+      cumulativeCost: Math.round(cumulativeCost),
+      cumulativeProfit: Math.round(cumulativeRevenue - cumulativeCost),
+    });
+  }
+
+  // CLV per client
+  const avgRevenuePerClient = avgEmployeesPerClient * pepmFee + monthlyPlatformFee;
+  const clientCLV = churnRate > 0
+    ? (avgRevenuePerClient / churnRate) + (avgEmployeesPerClient * onboardingFeePerEmployee)
+    : Infinity;
+
+  const annualSnapshots = [12, 24, 36].map(m => {
+    const d = monthlyData[m - 1];
+    return d ? {
+      month: m,
+      activeClients: d.activeClients,
+      activeEmployees: d.activeEmployees,
+      monthlyRevenue: d.monthRevenue,
+      recurringRevenue: d.recurringRevenue,
+      monthlyProfit: d.monthProfit,
+      cumulativeProfit: d.cumulativeProfit,
+    } : null;
+  }).filter(Boolean);
+
+  return {
+    monthlySalesCost,
+    clientCLV,
+    avgRevenuePerClient,
+    breakEvenMonth,
+    monthlyData,
+    annualSnapshots,
+  };
+}
+
+function fmt(n) {
+  if (n === Infinity) return "\u221E";
+  if (Math.abs(n) >= 1000) return "$" + n.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+  return "$" + n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function SliderInput({ label, value, onChange, min, max, step, prefix, suffix, description, color }) {
+  prefix = prefix || "";
+  suffix = suffix || "";
+  return (
+    <div style={{ marginBottom: 20 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 }}>
+        <label style={{ fontSize: 13, fontWeight: 600, color: "var(--label)", letterSpacing: "0.02em", textTransform: "uppercase" }}>{label}</label>
+        <span style={{ fontSize: 20, fontWeight: 700, color: color || "var(--accent)", fontFamily: "'DM Mono', monospace" }}>
+          {prefix}{typeof value === "number" ? value.toLocaleString() : value}{suffix}
+        </span>
+      </div>
+      {description && <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 6 }}>{description}</div>}
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(e) => onChange(parseFloat(e.target.value))}
+        style={{ width: "100%", accentColor: color || "var(--accent)" }}
+      />
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "var(--muted)", marginTop: 2 }}>
+        <span>{prefix}{min}{suffix}</span>
+        <span>{prefix}{max}{suffix}</span>
+      </div>
+    </div>
+  );
+}
+
+function KPI({ label, value, sub, accent }) {
+  return (
+    <div style={{
+      background: "var(--card)",
+      borderRadius: 12,
+      padding: "18px 16px",
+      border: accent ? "2px solid var(--accent)" : "1px solid var(--border)",
+      flex: "1 1 0",
+      minWidth: 150,
+    }}>
+      <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--muted)", marginBottom: 6, fontWeight: 600 }}>{label}</div>
+      <div style={{ fontSize: 22, fontWeight: 800, color: accent ? "var(--accent)" : "var(--text)", fontFamily: "'DM Mono', monospace", lineHeight: 1.1 }}>{value}</div>
+      {sub && <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>{sub}</div>}
+    </div>
+  );
+}
+
+function MiniChart({ data, dataKey, color, height }) {
+  height = height || 120;
+  const values = data.map(d => d[dataKey]);
+  const maxVal = Math.max(...values.map(Math.abs));
+  const minVal = Math.min(...values, 0);
+  const range = maxVal - minVal || 1;
+  const zeroY = maxVal / range * height;
+  const w = 100;
+
+  const points = values.map((v, i) => ({
+    x: (i / (values.length - 1)) * w,
+    y: zeroY - (v / range) * (height - 10),
+  }));
+
+  const pathD = points.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ");
+  const areaD = pathD + ` L${points[points.length - 1].x},${zeroY} L${points[0].x},${zeroY} Z`;
+
+  return (
+    <svg viewBox={`0 0 ${w} ${height}`} style={{ width: "100%", height }} preserveAspectRatio="none">
+      {minVal < 0 && <line x1="0" y1={zeroY} x2={w} y2={zeroY} stroke="var(--border)" strokeWidth="0.3" />}
+      <defs>
+        <linearGradient id={`grad-${dataKey}`} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={color} stopOpacity="0.3" />
+          <stop offset="100%" stopColor={color} stopOpacity="0.02" />
+        </linearGradient>
+      </defs>
+      <path d={areaD} fill={`url(#grad-${dataKey})`} />
+      <path d={pathD} fill="none" stroke={color} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function DataTable({ data }) {
+  const [expanded, setExpanded] = useState(false);
+  const rows = expanded ? data : data.filter(d => d.month % 3 === 0);
+
+  return (
+    <div style={{ background: "var(--card)", borderRadius: 14, padding: 16, border: "1px solid var(--border)" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+        <div style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--accent)", fontWeight: 700 }}>
+          Monthly Breakdown
+        </div>
+        <button
+          onClick={() => setExpanded(!expanded)}
+          style={{
+            background: "var(--border)", border: "none", color: "var(--label)", borderRadius: 6,
+            padding: "4px 10px", fontSize: 11, cursor: "pointer", fontFamily: "inherit",
+          }}
+        >
+          {expanded ? "Show Quarterly" : "Show All Months"}
+        </button>
+      </div>
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, fontFamily: "'DM Mono', monospace" }}>
+          <thead>
+            <tr style={{ borderBottom: "1px solid var(--border)" }}>
+              {["Mo", "Clients", "Employees", "Free Users", "Revenue", "Cost", "Profit", "Cumulative"].map(h => (
+                <th key={h} style={{ textAlign: "right", padding: "8px 6px", fontSize: 10, textTransform: "uppercase", color: "var(--muted)", fontWeight: 600, letterSpacing: "0.04em" }}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(d => (
+              <tr key={d.month} style={{ borderBottom: "1px solid var(--border)" }}>
+                <td style={{ padding: "6px", textAlign: "right", color: "var(--label)" }}>{d.month}</td>
+                <td style={{ padding: "6px", textAlign: "right" }}>{d.activeClients}</td>
+                <td style={{ padding: "6px", textAlign: "right" }}>{d.activeEmployees.toLocaleString()}</td>
+                <td style={{ padding: "6px", textAlign: "right", color: "var(--muted)" }}>{d.activeFreeUsers}</td>
+                <td style={{ padding: "6px", textAlign: "right", color: "var(--green)" }}>{fmt(d.monthRevenue)}</td>
+                <td style={{ padding: "6px", textAlign: "right", color: "var(--red)" }}>{fmt(d.monthCost)}</td>
+                <td style={{ padding: "6px", textAlign: "right", color: d.monthProfit >= 0 ? "var(--green)" : "var(--red)" }}>{fmt(d.monthProfit)}</td>
+                <td style={{ padding: "6px", textAlign: "right", fontWeight: 700, color: d.cumulativeProfit >= 0 ? "var(--green)" : "var(--red)" }}>{fmt(d.cumulativeProfit)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function App() {
+  // Sales costs
+  const [salesDailyWage, setSalesDailyWage] = useState(160);
+  const [benefitsMultiplier, setBenefitsMultiplier] = useState(1.3);
+  const [workDaysPerMonth, setWorkDaysPerMonth] = useState(22);
+  const [rampUpMonths, setRampUpMonths] = useState(3);
+
+  // Client acquisition (direct sales)
+  const [clientsPerMonth, setClientsPerMonth] = useState(3);
+  const [avgEmployeesPerClient, setAvgEmployeesPerClient] = useState(12);
+
+  // Revenue
+  const [onboardingFeePerEmployee, setOnboardingFeePerEmployee] = useState(75);
+  const [pepmFee, setPepmFee] = useState(32);
+  const [monthlyPlatformFee, setMonthlyPlatformFee] = useState(150);
+
+  // Freemium funnel
+  const [freeUsersPerMonth, setFreeUsersPerMonth] = useState(15);
+  const [freeToPayConversionPct, setFreeToPayConversionPct] = useState(8);
+  const [avgMonthsToConvert, setAvgMonthsToConvert] = useState(4);
+
+  // Costs
+  const [opCostPerEmployee, setOpCostPerEmployee] = useState(3);
+  const [monthlyFixedCosts, setMonthlyFixedCosts] = useState(500);
+
+  // Retention
+  const [monthlyClientRetention, setMonthlyClientRetention] = useState(96);
+
+  const results = useMemo(() => calculate({
+    salesDailyWage, benefitsMultiplier, workDaysPerMonth, rampUpMonths,
+    clientsPerMonth, avgEmployeesPerClient,
+    onboardingFeePerEmployee, pepmFee, monthlyPlatformFee,
+    freeUsersPerMonth, freeToPayConversionPct, avgMonthsToConvert,
+    opCostPerEmployee, monthlyFixedCosts,
+    monthlyClientRetention,
+  }), [
+    salesDailyWage, benefitsMultiplier, workDaysPerMonth, rampUpMonths,
+    clientsPerMonth, avgEmployeesPerClient,
+    onboardingFeePerEmployee, pepmFee, monthlyPlatformFee,
+    freeUsersPerMonth, freeToPayConversionPct, avgMonthsToConvert,
+    opCostPerEmployee, monthlyFixedCosts,
+    monthlyClientRetention,
+  ]);
+
+  const roi36 = results.monthlyData[35];
+  const totalROI = roi36 && roi36.cumulativeCost > 0
+    ? ((roi36.cumulativeRevenue - roi36.cumulativeCost) / roi36.cumulativeCost * 100).toFixed(0)
+    : 0;
+
+  return (
+    <div style={{ maxWidth: 880, margin: "0 auto", padding: "24px 16px" }} className="fade-in">
+      {/* Header */}
+      <div style={{ marginBottom: 32 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+          <div style={{ width: 8, height: 8, borderRadius: "50%", background: "var(--accent)", boxShadow: "0 0 12px var(--accent)" }} />
+          <span style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.12em", color: "var(--muted)", fontWeight: 600 }}>KC Business Solutions</span>
+        </div>
+        <h1 style={{ fontSize: 28, fontWeight: 700, lineHeight: 1.15, marginBottom: 6 }}>
+          Payroll Services<br />
+          <span style={{ color: "var(--accent)" }}>ROI Calculator</span>
+        </h1>
+        <p style={{ fontSize: 13, color: "var(--muted)", maxWidth: 520, lineHeight: 1.5 }}>
+          Model the return on investing in a field sales employee to acquire payroll clients.
+          Includes direct sales, freemium-to-paid conversion funnel, onboarding fees, and per-employee-per-month recurring revenue over 36 months.
+        </p>
+      </div>
+
+      {/* Input Panels */}
+      <div className="grid-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20, marginBottom: 24 }}>
+
+        {/* Sales Costs */}
+        <div style={{ background: "var(--card)", borderRadius: 14, padding: 20, border: "1px solid var(--border)" }}>
+          <div style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--red)", fontWeight: 700, marginBottom: 16 }}>
+            Sales Employee Cost
+          </div>
+          <SliderInput label="Daily Wage" value={salesDailyWage} onChange={setSalesDailyWage}
+            min={80} max={500} step={10} prefix="$" color="var(--red)"
+            description="Base daily pay before benefits" />
+          <SliderInput label="Benefits Multiplier" value={benefitsMultiplier} onChange={setBenefitsMultiplier}
+            min={1} max={2} step={0.05} suffix="\u00D7" color="var(--red)"
+            description="Payroll taxes, insurance, etc." />
+          <SliderInput label="Work Days / Month" value={workDaysPerMonth} onChange={setWorkDaysPerMonth}
+            min={15} max={26} step={1} suffix=" days" color="var(--red)" />
+          <SliderInput label="Ramp-Up Period" value={rampUpMonths} onChange={setRampUpMonths}
+            min={0} max={12} step={1} suffix=" mo" color="var(--red)"
+            description="Months to reach full pipeline (linear ramp)" />
+        </div>
+
+        {/* Direct Client Acquisition */}
+        <div style={{ background: "var(--card)", borderRadius: 14, padding: 20, border: "1px solid var(--border)" }}>
+          <div style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--accent2)", fontWeight: 700, marginBottom: 16 }}>
+            Direct Sales Pipeline
+          </div>
+          <SliderInput label="New Clients / Month" value={clientsPerMonth} onChange={setClientsPerMonth}
+            min={1} max={15} step={1} color="var(--accent2)"
+            description="Paid client companies signed per month (at full ramp)" />
+          <SliderInput label="Avg Employees / Client" value={avgEmployeesPerClient} onChange={setAvgEmployeesPerClient}
+            min={3} max={100} step={1} color="var(--accent2)"
+            description="Average team members per client company" />
+        </div>
+      </div>
+
+      <div className="grid-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20, marginBottom: 24 }}>
+
+        {/* Revenue */}
+        <div style={{ background: "var(--card)", borderRadius: 14, padding: 20, border: "1px solid var(--border)" }}>
+          <div style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--green)", fontWeight: 700, marginBottom: 16 }}>
+            Revenue Model
+          </div>
+          <SliderInput label="Onboarding Fee / Employee" value={onboardingFeePerEmployee} onChange={setOnboardingFeePerEmployee}
+            min={0} max={300} step={5} prefix="$" color="var(--green)"
+            description="One-time fee per team member onboarded" />
+          <SliderInput label="PEPM Fee" value={pepmFee} onChange={setPepmFee}
+            min={5} max={100} step={1} prefix="$" color="var(--green)"
+            description="Per employee per month recurring fee" />
+          <SliderInput label="Platform Fee / Client" value={monthlyPlatformFee} onChange={setMonthlyPlatformFee}
+            min={0} max={500} step={10} prefix="$" color="var(--green)"
+            description="Monthly base fee per client company" />
+        </div>
+
+        {/* Freemium Funnel */}
+        <div style={{ background: "var(--card)", borderRadius: 14, padding: 20, border: "1px solid var(--border)" }}>
+          <div style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--amber)", fontWeight: 700, marginBottom: 16 }}>
+            Freemium Funnel
+          </div>
+          <SliderInput label="Free Signups / Month" value={freeUsersPerMonth} onChange={setFreeUsersPerMonth}
+            min={0} max={100} step={1} color="var(--amber)"
+            description="Businesses using free invoicing / timekeeping" />
+          <SliderInput label="Conversion Rate" value={freeToPayConversionPct} onChange={setFreeToPayConversionPct}
+            min={0} max={30} step={1} suffix="%" color="var(--amber)"
+            description="Percent of free users who upgrade to paid payroll" />
+          <SliderInput label="Avg Time to Convert" value={avgMonthsToConvert} onChange={setAvgMonthsToConvert}
+            min={1} max={12} step={1} suffix=" mo" color="var(--amber)"
+            description="Months on free tier before upgrading" />
+        </div>
+      </div>
+
+      {/* Operating Costs + Retention — full width */}
+      <div className="grid-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20, marginBottom: 32 }}>
+        <div style={{ background: "var(--card)", borderRadius: 14, padding: 20, border: "1px solid var(--border)" }}>
+          <div style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--muted)", fontWeight: 700, marginBottom: 16 }}>
+            Operating Costs
+          </div>
+          <SliderInput label="Cost / Employee / Mo" value={opCostPerEmployee} onChange={setOpCostPerEmployee}
+            min={0} max={20} step={0.5} prefix="$"
+            description="Variable cost to service each employee (processing, compliance)" />
+          <SliderInput label="Fixed Monthly Costs" value={monthlyFixedCosts} onChange={setMonthlyFixedCosts}
+            min={0} max={5000} step={50} prefix="$"
+            description="Software, infrastructure, overhead beyond the sales employee" />
+        </div>
+        <div style={{ background: "var(--card)", borderRadius: 14, padding: 20, border: "1px solid var(--border)" }}>
+          <div style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--accent)", fontWeight: 700, marginBottom: 16 }}>
+            Client Retention
+          </div>
+          <SliderInput label="Monthly Retention Rate" value={monthlyClientRetention} onChange={setMonthlyClientRetention}
+            min={80} max={99.5} step={0.5} suffix="%"
+            description={`${(100 - monthlyClientRetention).toFixed(1)}% churn \u2192 avg client stays ${monthlyClientRetention > 80 ? (1 / (1 - monthlyClientRetention / 100)).toFixed(0) : "~5"} months`} />
+          <div style={{ marginTop: 12, padding: 12, background: "var(--bg)", borderRadius: 8, fontSize: 12, color: "var(--label)", lineHeight: 1.5 }}>
+            Payroll is sticky. Industry average retention is 95-97% monthly.
+            A 96% rate means the average client stays <strong style={{ color: "var(--accent)" }}>~2 years</strong>.
+          </div>
+        </div>
+      </div>
+
+      {/* KPIs */}
+      <div className="kpi-row" style={{ display: "flex", gap: 12, marginBottom: 28, flexWrap: "wrap" }}>
+        <KPI
+          label="Break Even"
+          value={results.breakEvenMonth ? `Month ${results.breakEvenMonth}` : "N/A"}
+          sub={results.breakEvenMonth ? (results.breakEvenMonth <= 12 ? "Within year 1" : `Year ${Math.ceil(results.breakEvenMonth / 12)}`) : "Not within 36 months"}
+          accent={results.breakEvenMonth && results.breakEvenMonth <= 12}
+        />
+        <KPI
+          label="Client Lifetime Value"
+          value={fmt(results.clientCLV)}
+          sub={`${fmt(results.avgRevenuePerClient)}/mo recurring`}
+        />
+        <KPI
+          label="Monthly Sales Cost"
+          value={fmt(results.monthlySalesCost)}
+          sub={`${Math.round(results.monthlySalesCost / results.avgRevenuePerClient * 10) / 10} clients to cover`}
+        />
+        <KPI
+          label="3-Year ROI"
+          value={`${totalROI}%`}
+          sub={roi36 ? `${fmt(roi36.cumulativeProfit)} cumulative` : ""}
+          accent={totalROI > 0}
+        />
+      </div>
+
+      {/* Charts */}
+      <div className="grid-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 24 }}>
+        <div style={{ background: "var(--card)", borderRadius: 14, padding: 16, border: "1px solid var(--border)" }}>
+          <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--muted)", fontWeight: 600, marginBottom: 8 }}>Monthly Profit</div>
+          <MiniChart data={results.monthlyData} dataKey="monthProfit" color="var(--green)" />
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "var(--muted)", marginTop: 4 }}>
+            <span>Mo 1</span><span>Mo 36</span>
+          </div>
+        </div>
+        <div style={{ background: "var(--card)", borderRadius: 14, padding: 16, border: "1px solid var(--border)" }}>
+          <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--muted)", fontWeight: 600, marginBottom: 8 }}>Active Employees on Payroll</div>
+          <MiniChart data={results.monthlyData} dataKey="activeEmployees" color="var(--accent2)" />
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "var(--muted)", marginTop: 4 }}>
+            <span>Mo 1</span><span>Mo 36</span>
+          </div>
+        </div>
+      </div>
+
+      <div className="grid-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 28 }}>
+        <div style={{ background: "var(--card)", borderRadius: 14, padding: 16, border: "1px solid var(--border)" }}>
+          <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--muted)", fontWeight: 600, marginBottom: 8 }}>Monthly Recurring Revenue</div>
+          <MiniChart data={results.monthlyData} dataKey="recurringRevenue" color="var(--green)" />
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "var(--muted)", marginTop: 4 }}>
+            <span>Mo 1</span><span>Mo 36</span>
+          </div>
+        </div>
+        <div style={{ background: "var(--card)", borderRadius: 14, padding: 16, border: "1px solid var(--border)" }}>
+          <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--muted)", fontWeight: 600, marginBottom: 8 }}>Client Companies</div>
+          <MiniChart data={results.monthlyData} dataKey="activeClients" color="var(--amber)" />
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "var(--muted)", marginTop: 4 }}>
+            <span>Mo 1</span><span>Mo 36</span>
+          </div>
+        </div>
+      </div>
+
+      {/* Annual Snapshots */}
+      <div style={{ background: "var(--card)", borderRadius: 14, padding: 20, border: "1px solid var(--border)", marginBottom: 24 }}>
+        <div style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--accent)", fontWeight: 700, marginBottom: 16 }}>
+          Annual Snapshots
+        </div>
+        <div className="grid-3" style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }}>
+          {results.annualSnapshots.map(snap => (
+            <div key={snap.month} style={{ background: "var(--bg)", borderRadius: 10, padding: 16 }}>
+              <div style={{ fontSize: 14, fontWeight: 700, color: "var(--accent)", marginBottom: 12 }}>
+                Year {snap.month / 12}
+              </div>
+              <div style={{ display: "grid", gap: 10 }}>
+                <div>
+                  <div style={{ fontSize: 10, color: "var(--muted)", textTransform: "uppercase" }}>Clients</div>
+                  <div style={{ fontSize: 18, fontWeight: 700, fontFamily: "'DM Mono', monospace" }}>{snap.activeClients}</div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 10, color: "var(--muted)", textTransform: "uppercase" }}>Employees</div>
+                  <div style={{ fontSize: 18, fontWeight: 700, fontFamily: "'DM Mono', monospace" }}>{snap.activeEmployees.toLocaleString()}</div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 10, color: "var(--muted)", textTransform: "uppercase" }}>Monthly Revenue</div>
+                  <div style={{ fontSize: 16, fontWeight: 700, fontFamily: "'DM Mono', monospace", color: "var(--green)" }}>{fmt(snap.monthlyRevenue)}</div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 10, color: "var(--muted)", textTransform: "uppercase" }}>Monthly Recurring</div>
+                  <div style={{ fontSize: 16, fontWeight: 700, fontFamily: "'DM Mono', monospace", color: "var(--accent2)" }}>{fmt(snap.recurringRevenue)}</div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 10, color: "var(--muted)", textTransform: "uppercase" }}>Monthly Profit</div>
+                  <div style={{ fontSize: 16, fontWeight: 700, fontFamily: "'DM Mono', monospace", color: snap.monthlyProfit >= 0 ? "var(--green)" : "var(--red)" }}>{fmt(snap.monthlyProfit)}</div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 10, color: "var(--muted)", textTransform: "uppercase" }}>Cumulative P/L</div>
+                  <div style={{ fontSize: 16, fontWeight: 700, fontFamily: "'DM Mono', monospace", color: snap.cumulativeProfit >= 0 ? "var(--green)" : "var(--red)" }}>{fmt(snap.cumulativeProfit)}</div>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Data Table */}
+      <DataTable data={results.monthlyData} />
+
+      {/* Footer */}
+      <div style={{ fontSize: 10, color: "var(--muted)", textAlign: "center", padding: "16px 0 8px", lineHeight: 1.6 }}>
+        KC Business Solutions &mdash; Payroll Services ROI Model<br />
+        Cohort-based retention &bull; Linear ramp-up &bull; Freemium conversion funnel included<br />
+        For planning purposes only &mdash; actual results depend on market conditions and execution
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
